@@ -5,8 +5,8 @@ date: '2022-05-02'
 ---
 
 ```{r setup, include=FALSE}
-library(tidyverse)
-library(igraph)
+library("tidyverse")
+library("igraph")
 ```
 
 Hello, Network!
