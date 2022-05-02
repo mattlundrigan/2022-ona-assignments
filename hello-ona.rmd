@@ -1,0 +1,13 @@
+---
+title: "Exercise 0"
+output: github_document
+date: '2022-05-02'
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(igraph)
+```
+
+Hello, Network!
+
