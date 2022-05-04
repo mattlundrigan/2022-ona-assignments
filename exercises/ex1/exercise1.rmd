@@ -1,0 +1,95 @@
+---
+title: "Exercise 1"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+
+
+```
+
+
+
+Load required packages
+```{r}
+library("tidyverse")
+library("igraph")
+
+```
+
+## Loading Dataset
+Import dataset (my own personal LinkedIn connections data)
+```{r}
+con_fixed = read_csv('connections_fixed.csv')
+```
+
+## Get count of contacts by employer
+```{r}
+company_summary = con_fixed %>% count(Company, sort=TRUE)
+ 
+View(company_summary)
+```
+
+## Create Nodes and Edges Dataframe with igraph
+
+### Create Nodes Dataframe
+
+First, create a new column with first name and first letter of last name as the label
+```{r}
+con_fixed$last_initial <- substr(con_fixed$`Last Name`, 1, 1)
+con_fixed$node_label <- paste(con_fixed$`First Name`, con_fixed$last_initial)
+```
+
+
+Then, generate the node list, which is the unique instances of our node labels. For this exercise, because I reduced the node labels to be the first name and first initial of the last name (to protect the privacy of my connections), there might be duplicates in my node_label list. Meaning that my list of nodes will actually be smaller than my number of connections
+```{r}
+nodes <- con_fixed %>% distinct(node_label)
+nodes <- nodes %>% rowid_to_column("id")
+nodes
+```
+### Create Edges Dataframe
+What will dictate the edges is based on people in my network having the same organization. So all members from McGill will each be affiliated with each other. To do this I do a cross join to get a dataframe of all possible combinations of connections, and then filter for only the connections that count based on the criteria outlined above (i.e, the companies are the same).
+
+```{r}
+copy_con_fixed <- con_fixed
+colnames(copy_con_fixed) <- paste(colnames(copy_con_fixed), "2", sep="_")
+
+cross_join_con <- tidyr::crossing(con_fixed, copy_con_fixed, .name_repair="minimal")
+
+edges <- filter(cross_join_con, 
+                cross_join_con$Company == cross_join_con$Company_2 & 
+                  cross_join_con$node_label != cross_join_con$node_label_2)
+
+edges <- edges %>% select(node_label, Company, node_label_2, Company_2) 
+
+```
+
+```{r}
+edges <- edges %>% 
+  left_join(nodes, by = c("node_label" = "node_label")) %>% 
+  rename(node_1 = id)
+
+edges <- edges %>% 
+  left_join(nodes, by = c("node_label_2" = "node_label")) %>% 
+  rename(node_2 = id)
+
+```
+```{r}
+edges <- select(edges, node_1, node_2)
+```
+
+
+## Plot The Resulting Network
+
+```{r}
+library(tidygraph)
+library(ggraph)
+```
+
+```{r}
+network <- tbl_graph(nodes=nodes, edges=edges, directed=FALSE)
+network
+ggraph(network) + geom_edge_link() + geom_node_point() + theme_graph()
+```
+
+
