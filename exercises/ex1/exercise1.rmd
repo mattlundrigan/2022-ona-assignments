@@ -21,13 +21,14 @@ library("igraph")
 Import dataset (my own personal LinkedIn connections data)
 ```{r}
 con_fixed = read_csv('connections_fixed.csv')
+con_fixed %>% drop_na(Company)
 ```
 
 ## Get count of contacts by employer
 ```{r}
 company_summary = con_fixed %>% count(Company, sort=TRUE)
  
-View(company_summary)
+company_summary
 ```
 
 ## Create Nodes and Edges Dataframe with igraph
@@ -74,8 +75,10 @@ edges <- edges %>%
   rename(node_2 = id)
 
 ```
+
 ```{r}
 edges <- select(edges, node_1, node_2)
+edges
 ```
 
 
