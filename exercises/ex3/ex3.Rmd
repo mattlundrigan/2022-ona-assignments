@@ -1,0 +1,312 @@
+---
+title: "Exercise 3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(arrow)
+library(ggraph)
+library(igraph)
+```
+
+## Load data
+
+Load the following data:
+  + applications from `app_data_sample.parquet`
+  + edges from `edges_sample.csv`
+
+```{r load-data}
+# change to your own path!
+data_path <- "C:/Users/mattl/OneDrive/Documents/Education/Masters/Courses/Spring Semester/Organizational Network Analysis/2022-ona-assignments/exercises/ex3/672_project_data/"
+applications <- read_parquet(paste0(data_path,"app_data_sample.parquet"))
+edges <- read_csv(paste0(data_path,"edges_sample.csv"))
+applications
+edges
+```
+
+## Get gender for examiners
+
+We'll get gender based on the first name of the examiner, which is recorded in the field `examiner_name_first`. We'll use library `gender` for that, relying on a modified version of their own [example](https://cran.r-project.org/web/packages/gender/vignettes/predicting-gender.html).
+
+Note that there are over 2 million records in the applications table -- that's because there are many records for each examiner, as many as the number of applications that examiner worked on during this time frame. Our first step therefore is to get all *unique* names in a separate list `examiner_names`. We will then guess gender for each one and will join this table back to the original dataset. So, let's get names without repetition:
+
+```{r gender-1}
+library(gender)
+#install_genderdata_package() # only run this line the first time you use the package, to get data for it
+# get a list of first names without repetitions
+examiner_names <- applications %>% 
+  distinct(examiner_name_first)
+examiner_names
+```
+
+Now let's use function `gender()` as shown in the example for the package to attach a gender and probability to each name and put the results into the table `examiner_names_gender`
+
+```{r gender-2}
+# get a table of names and gender
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+examiner_names_gender
+```
+
+Finally, let's join that table back to our original applications data and discard the temporary tables we have just created to reduce clutter in our environment.
+
+```{r gender-3}
+# remove extra columns from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+# joining gender back to the dataset
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+
+
+## Guess the examiner's race
+
+We'll now use package `wru` to estimate likely race of an examiner. Just like with gender, we'll get a list of unique names first, only now we are using surnames.
+
+```{r race-1}
+library(wru)
+examiner_surnames <- applications %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+examiner_surnames
+```
+We'll follow the instructions for the package outlined here [https://github.com/kosukeimai/wru](https://github.com/kosukeimai/wru).
+
+```{r race-2}
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+examiner_race
+```
+
+As you can see, we get probabilities across five broad US Census categories: white, black, Hispanic, Asian and other. (Some of you may correctly point out that Hispanic is not a race category in the US Census, but these are the limitations of this package.)
+
+Our final step here is to pick the race category that has the highest probability for each last name and then join the table back to the main applications table. See this example for comparing values across columns: [https://www.tidyverse.org/blog/2020/04/dplyr-1-0-0-rowwise/](https://www.tidyverse.org/blog/2020/04/dplyr-1-0-0-rowwise/). And this one for `case_when()` function: [https://dplyr.tidyverse.org/reference/case_when.html](https://dplyr.tidyverse.org/reference/case_when.html).
+
+```{r race-3}
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+examiner_race
+```
+
+Let's join the data back to the applications table.
+
+```{r race-4}
+# removing extra columns
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+```
+
+
+## Examiner's tenure 
+
+To figure out the timespan for which we observe each examiner in the applications data, let's find the first and the last observed date for each examiner. We'll first get examiner IDs and application dates in a separate table, for ease of manipulation. We'll keep examiner ID (the field `examiner_id`), and earliest and latest dates for each application (`filing_date` and `appl_status_date` respectively). We'll use functions in package `lubridate` to work with date and time values.
+
+```{r tenure-1}
+library(lubridate) # to work with dates
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+examiner_dates
+```
+
+The dates look inconsistent in terms of formatting. Let's make them consistent. We'll create new variables `start_date` and `end_date`.
+
+```{r tenure-2}
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+```
+
+Let's now identify the earliest and the latest date for each examiner and calculate the difference in days, which is their tenure in the organization.
+
+```{r tenure-3}
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+    ) %>% 
+  filter(year(latest_date)<2018)
+examiner_dates
+```
+
+Joining back to the applications data.
+
+```{r tenure-4}
+applications <- applications %>% 
+  left_join(examiner_dates, by = "examiner_id")
+rm(examiner_dates)
+gc()
+```
+
+## Select 2 Workgroups to focus on
+```{r}
+wg173 <- applications[substr(applications$examiner_art_unit, 1, 3) == 173,]
+wg175 <- applications[substr(applications$examiner_art_unit, 1, 3) == 175,]
+```
+
+## Demographics
+First, we will take these dataframes and get unique occurrences based on the examiner_id column. This way, our demographics won't be skewed by repititions of the same examiner.
+```{r}
+wg173_unique <- wg173[row.names(unique(wg173[,"examiner_id"])),]
+wg175_unique <- wg175[row.names(unique(wg175[,"examiner_id"])),]
+```
+
+```{r}
+summary(wg173_unique)
+```
+
+```{r}
+summary(wg175_unique)
+```
+### Comparing Gender Breakdown
+```{r}
+library(gridExtra)
+a <- ggplot(data=wg173_unique, aes(x=gender)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)) )  +
+  ylab("Proportion")+
+  xlab("Gender")+
+  ylim(0,1)+
+  ggtitle(paste0("Gender Breakdown for work Group 173"))
+
+b <- ggplot(data=wg175_unique, aes(x=gender)) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  ylab("Proportion")+
+  xlab("Gender")+
+  ylim(0,1)+
+  ggtitle(paste0("Gender Breakdown for Work Group 175"))
+grid.arrange(a,b,ncol=2, widths=c(1,1))
+```
+We can see above that Work Group 173 has a slightly higher proportion of males than Work Group 175.
+
+### Comparing Race Breakdown
+```{r}
+a <- ggplot(data=wg173_unique, aes(x=race)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)) )  +
+  ylab("Proportion")+
+  xlab("Gender")+
+  ylim(0,1)+
+  ggtitle(paste0("Race Breakdown for work Group 173"))
+
+b <- ggplot(data=wg175_unique, aes(x=race)) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  ylab("Proportion")+
+  xlab("Gender")+
+  ylim(0,1)+
+  ggtitle(paste0("Race Breakdown for Work Group 175"))
+grid.arrange(a,b,ncol=2, widths=c(1,1))
+```
+Here, we can see that both groups are predominantly white, however, work group 173 seem to have higher proportions of asian and hispanic examiners, whereas work group 175 has a higher proportion of black examiners.
+
+### Comparing Tenure
+```{r}
+a <- ggplot(data=wg173_unique, aes(x=tenure_days)) +
+  geom_histogram(bins=30) +
+  ylab("Count")+
+  xlab("Tenure in Days")+
+  ggtitle(paste0("Tenure Distribution for Work Group 173"))
+
+b <- ggplot(data=wg175_unique, aes(x=tenure_days)) +
+  geom_histogram(bins=30) +
+  ylab("Count")+
+  xlab("Tenure in Days")+
+  ggtitle(paste0("Tenure Distribution for Work Group 173"))
+grid.arrange(a,b,ncol=2, widths=c(1,1))
+```
+When considering tenure, we can see that both work groups have examiners with a ton of experience, with the vast majority of both groups having at least 5500 days of tenure. However, work group 175 also seems to have more newer employees than work group 173.
+
+## Advice Networks
+```{r}
+# first get work group for each examiner and limit to our two wgs of interest
+examiner_aus = distinct(subset(applications, select=c(examiner_art_unit, examiner_id)))
+
+# we eventually want to make a network with nodes colored by work group, so lets add that indicator
+examiner_aus$wg = substr(examiner_aus$examiner_art_unit, 1,3)
+
+# restrict down to our selected art units to reduce merging complexity later on
+examiner_aus = examiner_aus[examiner_aus$wg==173 | examiner_aus$wg==176,]
+
+# now we will merge in the aus df on applications 
+tM = merge(x=edges, y=examiner_aus, by.x="ego_examiner_id", by.y="examiner_id", all.x=TRUE)
+tM = tM %>% rename(ego_art_unit=examiner_art_unit, ego_wg=wg)
+
+tM = drop_na(tM)
+
+# now repeat for the alter examiners
+tM = merge(x=tM, y=examiner_aus, by.x="alter_examiner_id", by.y="examiner_id", all.x=TRUE)
+tM = tM %>% rename(alter_art_unit=examiner_art_unit, alter_wg=wg)
+tM = drop_na(tM)
+
+```
+
+```{r}
+# we are left with 870 edges corresponding to instances of examiners in wg173 or wg175 asking for advice
+egoNodes = subset(tM, select=c(ego_examiner_id,ego_art_unit, ego_wg)) %>% rename(examiner_id=ego_examiner_id,art_unit=ego_art_unit,wg=ego_wg)
+alterNodes = subset(tM, select=c(alter_examiner_id,alter_art_unit, alter_wg))%>% rename(examiner_id=alter_examiner_id,art_unit=alter_art_unit,wg=alter_wg)
+nodes = rbind(egoNodes, alterNodes)
+nodes = distinct(nodes)
+
+# problem: when we reduce to the list of distinct vertices, we actually have more than we should, since some examiners move amongst art units/wgs in this data subset
+nodes = nodes %>% group_by(examiner_id) %>% summarise(examiner_id=first(examiner_id), art_unit=first(art_unit), wg=first(wg))
+```
+
+```{r}
+network <- graph_from_data_frame(d=tM, vertices=nodes, directed=TRUE)
+network
+
+# Calculate the node metrics
+Degree <- degree(network)
+Closeness <- closeness(network)
+Betweenness <- betweenness(network)
+Eig <- evcent(network)$vector
+
+V(network)$size <- Degree
+V(network)$color <- nodes$art_unit
+
+comp <- data.frame(nodes, Degree, Eig, Closeness, Betweenness)   
+comp 
+```
+```{r}
+ggraph(network, layout="kk") +
+  geom_edge_link()+
+  geom_node_point(aes(size=size, color=color), show.legend=T)
+```
+Using the graph above, we can see a good amount of mixing with individuals seeking advice from those outside their respective work group's. The two work group id's I selected are close to each other numerically (173 and 176), so it could be likely that these work groups are also near each other in terms of subject matter of the patents. This would explain why we see such an intermixing of advice between the two groups. 
+
+In terms of centrality scores, the main 4 that I chose to examine were degree, betweenness, closeness, and eigen vector. Looking at the 'comp' dataframe created to compare the examiners respective centrality scores, we can see the examiner with the id 89539 has almost double the degree centrality of the next highest examiner. He or she also has a perfect eigen vector score of 1. Meaning not only do they have many instances of seeking advice or being sought after for advice, they also are doing this with the most important people in the network. Looking a bit more in depth at this specific examiner:
+
+```{r}
+ex_89539 <- applications[applications$examiner_id == 89539,]
+```
+
+Here, we can see that Jerry has been around for quite a long time (6318 days), spanning from 2001 up until 2017. In that time, he has been the examiner for over 9000 patents.A deeper analysis here could also be beneficial to look at the variety of these patents as this could explain such a high degree centrality.
+
+When looking at the betweenness scores for the nodes in the network, we see that they are relatively low (aside from examiner 98582), which is likely due to the clustered shape of the network, indicating that it is fairly well connected and it is often not too detrimental to find another path through the network if one of the nodes were missing. 
+
+
