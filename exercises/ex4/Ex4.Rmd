@@ -303,4 +303,7 @@ Some notes/insights/hypothesis based on these results:
  - Unit increase in betweenness for males decreases processing time by 78 days
  
  It should be noted that it is difficult to infer how a change by one or many examiners would impact the processing times since each of the centrality scores are interrelated. 
+ 
+
+ 
 
